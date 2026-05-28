@@ -1,65 +1,213 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+import Link from "next/link";
+import { ModeToggle } from "@/components/core/theme-changer";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { Empty } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
+import { PlusIcon, SearchIcon, SparklesIcon } from "lucide-react";
+import { useTodos } from "@/hooks/use-todos";
+import { TodoDialog } from "@/components/todo-dialog";
+import { TodoCard } from "@/components/todo-card";
+import { Todo, CreateTodoInput, UpdateTodoInput } from "@/types/todo";
+import { toast } from "sonner";
+import AIAgent from "./ai-agent";
+
+export default function Page() {
+  const {
+    todos,
+    loading,
+    error,
+    create,
+    update,
+    delete: deleteTodo,
+    toggle,
+    refetch,
+  } = useTodos();
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingTodo, setEditingTodo] = useState<Todo | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [isDialogLoading, setIsDialogLoading] = useState(false);
+
+  // Filter todos based on search and status
+  const filteredTodos = todos.filter((todo) => {
+    const matchesSearch =
+      todo.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      todo.description?.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus =
+      statusFilter === "all" || todo.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
+
+  const handleCreateTodo = async (input: CreateTodoInput) => {
+    setIsDialogLoading(true);
+    try {
+      await create(input);
+    } catch (error) {
+      // Error is already handled by the hook
+    } finally {
+      setIsDialogLoading(false);
+    }
+  };
+
+  const handleUpdateTodo = async (input: CreateTodoInput) => {
+    if (!editingTodo) return;
+    setIsDialogLoading(true);
+    try {
+      const updateInput: UpdateTodoInput = {
+        title: input.title,
+        description: input.description,
+        priority: input.priority,
+        dueDate: input.dueDate,
+      };
+      await update(editingTodo.id, updateInput);
+      setEditingTodo(null);
+    } catch (error) {
+      // Error is already handled by the hook
+    } finally {
+      setIsDialogLoading(false);
+    }
+  };
+
+  const handleDeleteTodo = async (id: number) => {
+    if (!confirm("Are you sure you want to delete this todo?")) return;
+    try {
+      await deleteTodo(id);
+      toast.success("Todo deleted");
+    } catch (error) {
+      // Error is already handled by the hook
+    }
+  };
+
+  const handleToggleTodo = async (id: number) => {
+    try {
+      await toggle(id);
+    } catch (error) {
+      // Error is already handled by the hook
+    }
+  };
+
+  const handleOpenDialog = (todo?: Todo) => {
+    if (todo) {
+      setEditingTodo(todo);
+    } else {
+      setEditingTodo(null);
+    }
+    setDialogOpen(true);
+  };
+
+  const handleCloseDialog = () => {
+    setDialogOpen(false);
+    setEditingTodo(null);
+    setIsDialogLoading(false);
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="min-h-dvh relative">
+      <ModeToggle />
+      <AIAgent onTodosUpdated={refetch} />
+      <section className="container flex flex-col justify-start items-start mx-auto py-12 bg-muted min-h-dvh p-4 gap-4 lg:p-6">
+        {/* Header Section */}
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center w-full gap-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">My Todos</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              {filteredTodos.length} of {todos.length} todos
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            <Link href="/ai-chat" className="w-full sm:w-auto">
+              <Button variant="outline" size="lg" className="gap-2 w-full">
+                <SparklesIcon className="h-4 w-4" />
+                AI Chat
+              </Button>
+            </Link>
+            <Button
+              onClick={() => handleOpenDialog()}
+              size="lg"
+              className="gap-2 w-full sm:w-auto"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              <PlusIcon className="h-4 w-4" />
+              Add Todo
+            </Button>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+
+        {/* Filters Section */}
+        <div className="flex flex-col sm:flex-row gap-3 w-full">
+          <div className="flex-1 relative">
+            <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search todos..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          </div>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="px-3 py-2 rounded-md border border-input bg-transparent text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
-            Documentation
-          </a>
+            <option value="all">All Status</option>
+            <option value="pending">Pending</option>
+            <option value="in_progress">In Progress</option>
+            <option value="completed">Completed</option>
+          </select>
         </div>
-      </main>
-    </div>
+
+        {/* Error State */}
+        {error && (
+          <div className="w-full bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-200 px-4 py-3 rounded-lg">
+            {error}
+          </div>
+        )}
+
+        {/* Content Section */}
+        <div className="flex-1 w-full max-h-[calc(100dvh-300px)] overflow-y-auto space-y-4">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center h-64 gap-2">
+              <Spinner className="h-8 w-8" />
+              <p className="text-sm text-muted-foreground">Loading todos...</p>
+            </div>
+          ) : filteredTodos.length === 0 ? (
+            <Empty
+              title={
+                searchQuery || statusFilter !== "all"
+                  ? "No todos found"
+                  : "No todos yet"
+              }
+              description={
+                searchQuery || statusFilter !== "all"
+                  ? "Try adjusting your filters"
+                  : "Create your first todo to get started"
+              }
+            />
+          ) : (
+            filteredTodos.map((todo) => (
+              <TodoCard
+                key={todo.id}
+                todo={todo}
+                onEdit={() => handleOpenDialog(todo)}
+                onDelete={handleDeleteTodo}
+                onToggle={handleToggleTodo}
+              />
+            ))
+          )}
+        </div>
+      </section>
+
+      {/* Todo Dialog */}
+      <TodoDialog
+        open={dialogOpen}
+        onOpenChange={handleCloseDialog}
+        onSubmit={editingTodo ? handleUpdateTodo : handleCreateTodo}
+        initialTodo={editingTodo ?? undefined}
+        isLoading={isDialogLoading}
+      />
+    </main>
   );
 }
