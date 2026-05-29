@@ -59,6 +59,7 @@ export function AIAgentChat({
     setIsLoading(true);
 
     try {
+      console.log("[Chat] Sending message to /api/chat");
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -67,7 +68,20 @@ export function AIAgentChat({
         }),
       });
 
-      if (!response.ok) throw new Error("API request failed");
+      if (!response.ok) {
+        // Try to parse error details from response
+        let errorDetails = "API request failed";
+        try {
+          const errorData = await response.json();
+          errorDetails = errorData.details || errorData.error || errorDetails;
+          if (errorData.requestId) {
+            errorDetails += ` (Request ID: ${errorData.requestId})`;
+          }
+        } catch {
+          errorDetails = `HTTP ${response.status}: ${response.statusText}`;
+        }
+        throw new Error(errorDetails);
+      }
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No response body");
@@ -143,12 +157,30 @@ export function AIAgentChat({
         }
       }
     } catch (error) {
-      console.error("Chat error:", error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("[Chat] Error:", errorMsg);
+
+      // Build detailed error message
+      let displayError = "Sorry, I encountered an error.";
+
+      if (errorMsg.includes("500") || errorMsg.includes("Internal")) {
+        displayError =
+          "The AI service encountered a temporary error. This sometimes happens with the Gemini API. Please try again in a moment.";
+      } else if (errorMsg.includes("API key")) {
+        displayError = "The API key is not properly configured.";
+      } else if (errorMsg.includes("Network") || errorMsg.includes("fetch")) {
+        displayError =
+          "Network error. Please check your connection and try again.";
+      } else if (errorMsg.includes("timeout")) {
+        displayError = "Request timed out. Please try again.";
+      } else if (errorMsg.includes("Request ID")) {
+        displayError = `Error: ${errorMsg}. Please try again.`;
+      }
+
       const errorMessage: ChatMessage = {
         id: `error-${Date.now()}`,
         role: "assistant",
-        content:
-          "Sorry, I encountered an error. Please make sure the API key is configured.",
+        content: displayError,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {

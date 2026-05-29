@@ -4,6 +4,7 @@
  */
 
 import { Todo, CreateTodoInput, UpdateTodoInput } from "@/types/todo";
+import { fetchWithRetry } from "@/lib/error-handler";
 
 const API_BASE = "/api/todos";
 
@@ -32,10 +33,21 @@ export async function fetchTodos(params?: {
     }
 
     console.log(`[api-client] Fetching todos from: ${url.toString()}`);
-    const response = await fetch(url.toString());
+
+    const response = await fetchWithRetry(url.toString(), {
+      retryOptions: {
+        maxAttempts: 3,
+        initialDelayMs: 100,
+        maxDelayMs: 2000,
+      },
+    });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch todos: ${response.statusText}`);
+      const data = await response.json().catch(() => ({}));
+      throw new Error(
+        `Failed to fetch todos: ${response.statusText}` +
+          (data.details ? ` - ${data.details}` : ""),
+      );
     }
 
     const data = await response.json();

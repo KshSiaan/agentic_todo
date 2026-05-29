@@ -10,8 +10,28 @@ import {
 } from "ai";
 import { google, GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
 import z from "zod";
+import {
+  fetchWithRetry,
+  serializeError,
+  isRetryableError,
+} from "@/lib/error-handler";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
+
+// Logging utility
+function logToolCall(toolName: string, input: any, attempt: number = 1) {
+  console.log(
+    `[Tool:${toolName}] Executing (attempt ${attempt}):`,
+    JSON.stringify(input),
+  );
+}
+
+function logToolError(toolName: string, error: any, attempt: number = 1) {
+  console.error(
+    `[Tool:${toolName}] Error (attempt ${attempt}):`,
+    error instanceof Error ? error.message : String(error),
+  );
+}
 
 const tools = {
   getTodos: tool({
@@ -27,16 +47,35 @@ const tools = {
         .describe("Filter by completion status"),
     }),
     execute: async (input) => {
-      const params = new URLSearchParams();
-      if (input.status) params.append("status", input.status);
-      if (input.isCompleted !== undefined)
-        params.append("isCompleted", String(input.isCompleted));
+      try {
+        logToolCall("getTodos", input);
+        const params = new URLSearchParams();
+        if (input.status) params.append("status", input.status);
+        if (input.isCompleted !== undefined)
+          params.append("isCompleted", String(input.isCompleted));
 
-      const response = await fetch(
-        `${API_BASE}/api/todos?${params.toString()}`,
-      );
-      if (!response.ok) throw new Error("Failed to fetch todos");
-      return await response.json();
+        const url = `${API_BASE}/api/todos?${params.toString()}`;
+        const response = await fetchWithRetry(url, {
+          retryOptions: {
+            maxAttempts: 3,
+            initialDelayMs: 100,
+            maxDelayMs: 2000,
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `Failed to fetch todos: HTTP ${response.status} ${response.statusText}`,
+          );
+        }
+
+        const data = await response.json();
+        console.log(`[Tool:getTodos] Success: fetched ${data.length} todos`);
+        return data;
+      } catch (error) {
+        logToolError("getTodos", error);
+        throw error;
+      }
     },
   }),
 
@@ -46,9 +85,28 @@ const tools = {
       id: z.number().describe("The ID of the todo"),
     }),
     execute: async (input) => {
-      const response = await fetch(`${API_BASE}/api/todos/${input.id}`);
-      if (!response.ok) throw new Error(`Failed to fetch todo ${input.id}`);
-      return await response.json();
+      try {
+        logToolCall("getTodo", input);
+        const response = await fetchWithRetry(
+          `${API_BASE}/api/todos/${input.id}`,
+          {
+            retryOptions: { maxAttempts: 3 },
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `Failed to fetch todo ${input.id}: HTTP ${response.status}`,
+          );
+        }
+
+        const data = await response.json();
+        console.log(`[Tool:getTodo] Success: fetched todo ${input.id}`);
+        return data;
+      } catch (error) {
+        logToolError("getTodo", error);
+        throw error;
+      }
     },
   }),
 
@@ -71,13 +129,26 @@ const tools = {
         .describe("The due date of the todo item (ISO 8601)"),
     }),
     execute: async (input) => {
-      const response = await fetch(`${API_BASE}/api/todos`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      });
-      if (!response.ok) throw new Error("Failed to create todo");
-      return await response.json();
+      try {
+        logToolCall("addTodo", input);
+        const response = await fetchWithRetry(`${API_BASE}/api/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          retryOptions: { maxAttempts: 3 },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to create todo: HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log(`[Tool:addTodo] Success: created todo "${input.title}"`);
+        return data;
+      } catch (error) {
+        logToolError("addTodo", error);
+        throw error;
+      }
     },
   }),
 
@@ -104,45 +175,69 @@ const tools = {
         .describe("New due date (ISO 8601) or null to clear"),
     }),
     execute: async (input) => {
-      // First, find the todo by title
-      const getTodosResponse = await fetch(`${API_BASE}/api/todos`);
-      if (!getTodosResponse.ok) throw new Error("Failed to fetch todos list");
-      const todos = await getTodosResponse.json();
+      try {
+        logToolCall("updateTodo", input);
 
-      const matchingTodo = todos.find(
-        (t: any) =>
-          t.title.toLowerCase() === input.title.toLowerCase() ||
-          t.title.toLowerCase().includes(input.title.toLowerCase()),
-      );
+        // First, find the todo by title with retry
+        const getTodosResponse = await fetchWithRetry(`${API_BASE}/api/todos`, {
+          retryOptions: { maxAttempts: 3 },
+        });
 
-      if (!matchingTodo) {
-        throw new Error(`Todo with title "${input.title}" not found`);
+        if (!getTodosResponse.ok) {
+          throw new Error("Failed to fetch todos list");
+        }
+
+        const todos = await getTodosResponse.json();
+
+        const matchingTodo = todos.find(
+          (t: any) =>
+            t.title.toLowerCase() === input.title.toLowerCase() ||
+            t.title.toLowerCase().includes(input.title.toLowerCase()),
+        );
+
+        if (!matchingTodo) {
+          throw new Error(`Todo with title "${input.title}" not found`);
+        }
+
+        // Build update object with only provided fields
+        const updateData: any = {};
+        if (input.newTitle) updateData.title = input.newTitle;
+        if (input.status) updateData.status = input.status;
+        if (input.priority) updateData.priority = input.priority;
+        if (input.isCompleted !== undefined) {
+          updateData.isCompleted = input.isCompleted;
+          updateData.status = input.isCompleted ? "completed" : "pending";
+        }
+        if (input.description) updateData.description = input.description;
+        if (input.dueDate !== undefined) updateData.dueDate = input.dueDate;
+
+        const response = await fetchWithRetry(
+          `${API_BASE}/api/todos/${matchingTodo.id}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updateData),
+            retryOptions: { maxAttempts: 3 },
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to update todo: HTTP ${response.status}`);
+        }
+
+        const updated = await response.json();
+        console.log(
+          `[Tool:updateTodo] Success: updated todo "${matchingTodo.title}"`,
+        );
+        return {
+          success: true,
+          message: `Updated todo "${matchingTodo.title}"`,
+          todo: updated,
+        };
+      } catch (error) {
+        logToolError("updateTodo", error);
+        throw error;
       }
-
-      // Build update object with only provided fields
-      const updateData: any = {};
-      if (input.newTitle) updateData.title = input.newTitle;
-      if (input.status) updateData.status = input.status;
-      if (input.priority) updateData.priority = input.priority;
-      if (input.isCompleted !== undefined) {
-        updateData.isCompleted = input.isCompleted;
-        updateData.status = input.isCompleted ? "completed" : "pending";
-      }
-      if (input.description) updateData.description = input.description;
-      if (input.dueDate !== undefined) updateData.dueDate = input.dueDate;
-
-      const response = await fetch(`${API_BASE}/api/todos/${matchingTodo.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updateData),
-      });
-      if (!response.ok) throw new Error(`Failed to update todo`);
-      const updated = await response.json();
-      return {
-        success: true,
-        message: `Updated todo "${matchingTodo.title}"`,
-        todo: updated,
-      };
     },
   }),
 
@@ -153,29 +248,53 @@ const tools = {
       title: z.string().describe("The title of the todo to find and delete"),
     }),
     execute: async (input) => {
-      // First, find the todo by title
-      const getTodosResponse = await fetch(`${API_BASE}/api/todos`);
-      if (!getTodosResponse.ok) throw new Error("Failed to fetch todos list");
-      const todos = await getTodosResponse.json();
+      try {
+        logToolCall("deleteTodo", input);
 
-      const matchingTodo = todos.find(
-        (t: any) =>
-          t.title.toLowerCase() === input.title.toLowerCase() ||
-          t.title.toLowerCase().includes(input.title.toLowerCase()),
-      );
+        // First, find the todo by title with retry
+        const getTodosResponse = await fetchWithRetry(`${API_BASE}/api/todos`, {
+          retryOptions: { maxAttempts: 3 },
+        });
 
-      if (!matchingTodo) {
-        throw new Error(`Todo with title "${input.title}" not found`);
+        if (!getTodosResponse.ok) {
+          throw new Error("Failed to fetch todos list");
+        }
+
+        const todos = await getTodosResponse.json();
+
+        const matchingTodo = todos.find(
+          (t: any) =>
+            t.title.toLowerCase() === input.title.toLowerCase() ||
+            t.title.toLowerCase().includes(input.title.toLowerCase()),
+        );
+
+        if (!matchingTodo) {
+          throw new Error(`Todo with title "${input.title}" not found`);
+        }
+
+        const response = await fetchWithRetry(
+          `${API_BASE}/api/todos/${matchingTodo.id}`,
+          {
+            method: "DELETE",
+            retryOptions: { maxAttempts: 3 },
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to delete todo: HTTP ${response.status}`);
+        }
+
+        console.log(
+          `[Tool:deleteTodo] Success: deleted todo "${matchingTodo.title}"`,
+        );
+        return {
+          success: true,
+          message: `Deleted todo "${matchingTodo.title}"`,
+        };
+      } catch (error) {
+        logToolError("deleteTodo", error);
+        throw error;
       }
-
-      const response = await fetch(`${API_BASE}/api/todos/${matchingTodo.id}`, {
-        method: "DELETE",
-      });
-      if (!response.ok) throw new Error(`Failed to delete todo`);
-      return {
-        success: true,
-        message: `Deleted todo "${matchingTodo.title}"`,
-      };
     },
   }),
 };
@@ -184,13 +303,20 @@ export type ChatTools = InferUITools<typeof tools>;
 export type ChatMessage = UIMessage<never, UIDataTypes, ChatTools>;
 
 export async function POST(request: Request) {
+  const requestId = Math.random().toString(36).substring(7);
+  const startTime = Date.now();
+
   try {
+    console.log(`[Chat:${requestId}] Starting request`);
+
     const body = await request.json();
     const messages = body.messages || [];
 
     if (!Array.isArray(messages)) {
       throw new Error("Messages must be an array");
     }
+
+    console.log(`[Chat:${requestId}] Received ${messages.length} messages`);
 
     // Convert frontend messages to model format
     const modelMessages = messages.map(
@@ -200,19 +326,24 @@ export async function POST(request: Request) {
       }),
     );
 
-    const result = streamText({
-      model: google("gemma-4-31b-it"),
-      messages: modelMessages,
-      providerOptions: {
-        google: {
-          thinkingConfig: {
-            thinkingLevel: "minimal",
-          },
-        } satisfies GoogleGenerativeAIProviderOptions,
-      },
-      experimental_transform: smoothStream({ chunking: "word" }),
-      tools,
-      system: `You are a helpful AI assistant for a todo list app. Your responsibilities:
+    console.log(
+      `[Chat:${requestId}] Starting streamText with model: gemma-4-31b-it`,
+    );
+
+    try {
+      const result = streamText({
+        model: google("gemma-4-31b-it"),
+        messages: modelMessages,
+        providerOptions: {
+          google: {
+            thinkingConfig: {
+              thinkingLevel: "minimal",
+            },
+          } satisfies GoogleGenerativeAIProviderOptions,
+        },
+        experimental_transform: smoothStream({ chunking: "word" }),
+        tools,
+        system: `You are a helpful AI assistant for a todo list app. Your responsibilities:
 
       1. **Proactive Todo Creation**: 
         - ALWAYS interpret natural language statements as potential todos
@@ -243,11 +374,62 @@ export async function POST(request: Request) {
         - Explain reasoning behind suggestions
 
       When a user asks to update or delete a specific todo, ALWAYS search for it first by getting the full todo list and matching by title.`,
-      stopWhen: hasToolCall("finalAnswer"),
-    });
-    return result.toUIMessageStreamResponse();
+        stopWhen: hasToolCall("finalAnswer"),
+      });
+
+      console.log(`[Chat:${requestId}] Stream created successfully`);
+      return result.toUIMessageStreamResponse();
+    } catch (aiError) {
+      const elapsedTime = Date.now() - startTime;
+      console.error(
+        `[Chat:${requestId}] AI SDK Error after ${elapsedTime}ms:`,
+        {
+          name: aiError instanceof Error ? aiError.name : "Unknown",
+          message: aiError instanceof Error ? aiError.message : String(aiError),
+          isRetryable: isRetryableError(aiError),
+        },
+      );
+
+      // Check if it's a specific AI SDK error
+      if (
+        aiError instanceof Error &&
+        (aiError.name === "AI_RetryError" || aiError.message.includes("500"))
+      ) {
+        console.error(
+          `[Chat:${requestId}] Google API server error - these are typically transient and may resolve on retry`,
+        );
+        console.error(
+          `[Chat:${requestId}] Full error:`,
+          serializeError(aiError),
+        );
+      }
+
+      throw aiError;
+    }
   } catch (error) {
-    console.error("Error in chat route:", error);
-    return new Response("Internal Server Error", { status: 500 });
+    const elapsedTime = Date.now() - startTime;
+    console.error(
+      `[Chat:${requestId}] Fatal error after ${elapsedTime}ms:`,
+      serializeError(error),
+    );
+
+    // Return detailed error info for debugging
+    const errorResponse = {
+      error: "Chat request failed",
+      details: error instanceof Error ? error.message : String(error),
+      type: error instanceof Error ? error.name : "UnknownError",
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    console.error(`[Chat:${requestId}] Responding with:`, errorResponse);
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Request-ID": requestId,
+      },
+    });
   }
 }
